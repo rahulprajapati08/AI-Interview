@@ -27,6 +27,7 @@ from langchain_core.prompts import PromptTemplate
 import tempfile
 import os
 import uvicorn
+import subprocess
 
 app = FastAPI()
 user_sessions = {}
@@ -181,8 +182,9 @@ async def handle_audio(audio: UploadFile = File(...), focus_score: Optional[floa
 
     # Save audio
     contents = await audio.read()
-    tmp_path = f"temp_{uuid4().hex}.webm"
-    
+    tmp_path = f"temp_{uuid4().hex}.wav"
+
+
 
     with open(tmp_path, "wb") as f:
         f.write(contents)
@@ -195,8 +197,25 @@ async def handle_audio(audio: UploadFile = File(...), focus_score: Optional[floa
         return {"text": first_question, "answer": "", "confidence": 0.0}
 
     answer = transcribe(tmp_path)
-    confidence = get_confidence_score(tmp_path)
+    wav_path=f"temp_wav_{uuid4().hex}.wav"
+    cmd = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts",
+        "-i", tmp_path,
+        "-acodec", "pcm_s16le",
+        "-ac", "1",
+        "-ar", "16000",
+        wav_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print("FFMPEG STDERR:", result.stderr)
+
+
+    confidence = get_confidence_score(wav_path)
+
+    # cleanup
     os.remove(tmp_path)
+    os.remove(wav_path)
 
     # Get the current session object
     if isinstance(session_info, dict):

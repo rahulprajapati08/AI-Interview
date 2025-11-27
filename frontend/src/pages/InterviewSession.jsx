@@ -58,8 +58,8 @@ const useAutoDetectRecorder = () => {
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      // Try preferred webm;codecs=opus, fallback to browser default
-      let options = { mimeType: "audio/webm;codecs=opus" };
+      
+      let options = { mimeType: "audio/wav" };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
         options = {};
       }
@@ -84,7 +84,7 @@ const useAutoDetectRecorder = () => {
     return new Promise((resolve) => {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.onstop = () => {
-          const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+          const audioBlob = new Blob(chunksRef.current, { type: "audio/wav" });
 
           // Cleanup
           try { streamRef.current?.getTracks()?.forEach((t) => t.stop()); } catch {}
@@ -267,7 +267,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
       if (!audioBlob || audioBlob.size === 0) throw new Error("No audio captured");
 
       const formData = new FormData();
-      formData.append("audio", audioBlob, "recording.webm");
+      formData.append("audio", audioBlob, "recording.wav");
       formData.append("focus_score", focusScore.toString());
 
       const res = await fetch(`${API_BASE_URL}/api/audio`, {
@@ -327,10 +327,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
       if (isCapturing) await stopAudioCapture();
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (videoRef.current?.srcObject) videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-      // save feedback
-      await fetch(`${API_BASE_URL}/api/feedback`, {
-        headers: { ...getAuthHeaders() },
-      });
+     
     } catch (e) {
       console.warn("Terminate save warn:", e);
     } finally {
@@ -387,7 +384,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
         // Ensure /api/setup already called by your setup page.
         // Kick off conversation by sending an empty blob.
         const formData = new FormData();
-        formData.append("audio", new Blob([], { type: "audio/webm" }), "init.webm");
+        formData.append("audio", new Blob([], { type: "audio/wav" }), "init.wav");
         formData.append("focus_score", "1.0");
 
         const res = await fetch(`${API_BASE_URL}/api/audio`, {
@@ -431,7 +428,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
     setLoading(true);
     try {
       const formData = new FormData();
-      formData.append("audio", new Blob([], { type: "audio/webm" }), "skip.webm");
+      formData.append("audio", new Blob([], { type: "audio/wav" }), "skip.wav");
       formData.append("focus_score", "0");
 
       const res = await fetch(`${API_BASE_URL}/api/audio`, {
