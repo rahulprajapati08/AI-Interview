@@ -32,7 +32,7 @@ Categories:
 
 Respond **only** with a well-formatted JSON object like this:
 
-{
+{{
   "relevance": 85,
   "clarity": 78,
   "depth": 70,
@@ -40,7 +40,7 @@ Respond **only** with a well-formatted JSON object like this:
   "communication": 82,
   "overall": 80,
   "summary": "Your answers were clear and relevant with strong communication, though real-world depth could be improved."
-}
+}}
 
 """
     )

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useUser } from "@clerk/clerk-react";
+import { useBehaviorTracker } from "@/hooks/useBehaviorTracker";
 
 // ===== API base =====
 const API_BASE_URL =
@@ -49,6 +50,8 @@ const useAutoDetectRecorder = () => {
   const recordingTimerRef = useRef(null);
   const animationFrameRef = useRef(null);
 
+
+
   const [isRecording, setIsRecording] = useState(false);
   const [frequency, setFrequency] = useState([]);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -71,7 +74,6 @@ const useAutoDetectRecorder = () => {
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      
       let options = { mimeType: "audio/wav" };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
         options = {};
@@ -107,10 +109,10 @@ const useAutoDetectRecorder = () => {
             streamRef.current
               ?.getTracks()
               ?.forEach((t) => t.stop());
-          } catch {}
+          } catch { }
           try {
             audioContextRef.current?.close();
-          } catch {}
+          } catch { }
           if (recordingTimerRef.current)
             clearInterval(recordingTimerRef.current);
           if (animationFrameRef.current)
@@ -131,8 +133,9 @@ const useAutoDetectRecorder = () => {
   const detectSpeech = (analyser, onSpeechStart, onSpeechEnd) => {
     let isSpeaking = false;
     let silenceCounter = 0;
-    const SILENCE_FRAMES = 20; // ~20 animation frames of silence
-    const VOLUME_THRESHOLD = 18; // tweak as needed
+    const SILENCE_FRAMES = 90; // ~1.5 sec silence allowed
+    const VOLUME_THRESHOLD = 12; // more sensitive
+    let hasStartedSpeaking = false; // prevents early cutoff
 
     recordingTimerRef.current = setInterval(() => {
       setRecordingTime((p) => p + 1);
@@ -143,26 +146,33 @@ const useAutoDetectRecorder = () => {
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       analyser.getByteFrequencyData(dataArray);
-      const avg =
-        dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+
+      const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
       setFrequency(Array.from(dataArray.slice(0, 24)));
 
+      // --- Detect speaking ---
       if (avg > VOLUME_THRESHOLD) {
         silenceCounter = 0;
         if (!isSpeaking) {
           isSpeaking = true;
+          hasStartedSpeaking = true;
           onSpeechStart?.();
         }
       } else {
-        silenceCounter++;
-        if (isSpeaking && silenceCounter > SILENCE_FRAMES) {
-          isSpeaking = false;
-          onSpeechEnd?.();
-          return; // stop loop after end
+        // silence
+        if (isSpeaking) {
+          silenceCounter++;
+          if (silenceCounter > SILENCE_FRAMES && hasStartedSpeaking) {
+            isSpeaking = false;
+            onSpeechEnd?.();
+            return; // stop detection loop
+          }
         }
       }
+
       animationFrameRef.current = requestAnimationFrame(check);
     };
+
     animationFrameRef.current = requestAnimationFrame(check);
   };
 
@@ -214,9 +224,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
   const [currentQuestion, setCurrentQuestion] = useState("");
   const [transcript, setTranscript] = useState("");
   const [answers, setAnswers] = useState([]);
-  const [timeLeft, setTimeLeft] = useState(
-    (config.duration || 5) * 60
-  );
+  const [timeLeft, setTimeLeft] = useState((config.duration || 5) * 60);
   const [sessionComplete, setSessionComplete] = useState(false);
   const [showUserVideo, setShowUserVideo] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -224,15 +232,16 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
   const [error, setError] = useState(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [questionsRemaining, setQuestionsRemaining] =
-    useState(5);
+  const [questionsRemaining, setQuestionsRemaining] = useState(5);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [showTerminateModal, setShowTerminateModal] =
-    useState(false);
-  const [currentConfidence, setCurrentConfidence] =
-    useState(0);
+  const [showTerminateModal, setShowTerminateModal] = useState(false);
+  const [currentConfidence, setCurrentConfidence] = useState(0);
 
   const videoRef = useRef(null);
+
+
+  // ==== BEHAVIOR TRACKER ====
+  const behavior = useBehaviorTracker(videoRef, showUserVideo);
   const timerIntervalRef = useRef(null);
   const hasFetchedInitialQuestion = useRef(false);
 
@@ -256,9 +265,24 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
   // Speak question
   const speakQuestion = (text) => {
     if (!("speechSynthesis" in window)) return;
+    if (sessionComplete || timeLeft <= 0) return;
 
     window.speechSynthesis.cancel();
+
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoices = [
+      "Microsoft Aria Online (Natural)",
+      "Microsoft Jenny",
+      "Google UK English Female",
+      "Google US English",
+      "Microsoft Guy",
+    ];
+
+    let selectedVoice =
+      voices.find((v) => preferredVoices.includes(v.name)) || voices[0];
+
     const utterance = new SpeechSynthesisUtterance(text);
+    utterance.voice = selectedVoice;
     utterance.rate = 0.95;
     utterance.pitch = 1;
     utterance.volume = 1;
@@ -266,11 +290,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => {
       setIsSpeaking(false);
-      setIsListening(true);
-      setTimeout(() => startListening(), 400);
-    };
-    utterance.onerror = () => {
-      setIsSpeaking(false);
+      // listening will only really start if session is still active
       setIsListening(true);
       setTimeout(() => startListening(), 400);
     };
@@ -280,6 +300,13 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
 
   // Start listening
   const startListening = async () => {
+    // 🔒 Guard: don't start recording if session is over or timer done
+    if (sessionComplete || timeLeft <= 0) {
+      setIsCapturing(false);
+      setIsListening(false);
+      return;
+    }
+
     setIsCapturing(true);
     const analyser = await startAudioCapture();
     if (!analyser) {
@@ -290,13 +317,23 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
     }
     detectSpeech(
       analyser,
-      () => {}, // onSpeechStart (optional UI)
+      () => {
+        // onSpeechStart (optional UI)
+      },
       () => handleSpeechEnd() // onSpeechEnd
     );
   };
 
   // Handle speech end -> send audio
+  // Handle speech end -> send audio
   const handleSpeechEnd = async () => {
+    // ⛔ Absolute guard: if session is completed or time is up, do nothing
+    if (sessionComplete || timeLeft <= 0) {
+      setIsCapturing(false);
+      setIsListening(false);
+      return;
+    }
+
     setIsCapturing(false);
     setIsListening(false);
     setLoading(true);
@@ -361,24 +398,62 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
     }
   };
 
+
+  // Terminate interview
   // Terminate interview
   const handleTerminateInterview = async () => {
     try {
-      window.speechSynthesis?.cancel();
-      if (isCapturing) await stopAudioCapture();
-      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-      if (videoRef.current?.srcObject) videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-      // save feedback
-      await fetch(`${API_BASE_URL}/api/feedback`, {
+      // Mark session as done so no more logic runs
+      setSessionComplete(true);
+
+      // 🔇 Kill voice immediately
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        // Some browsers behave better if we pause too
+        window.speechSynthesis.pause();
+      }
+
+      // 🎙️ Stop any running recorder / mic (even if isCapturing flag is stale)
+      try {
+        await stopAudioCapture();
+      } catch (e) {
+        console.warn("stopAudioCapture failed on terminate:", e);
+      }
+
+      // ⏱️ Stop timer
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+
+      // 📷 Turn off camera
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject
+          .getTracks()
+          .forEach((t) => t.stop());
+        videoRef.current.srcObject = null;
+      }
+      setShowUserVideo(false);
+
+      // 👉 Directly fetch feedback and go to results
+      const res = await fetch(`${API_BASE_URL}/api/feedback`, {
         headers: { ...getAuthHeaders() },
       });
+      const feedback = await res.json();
+
+      if (onComplete) {
+        onComplete(feedback);
+      } else {
+        navigate("/interviews", {
+          state: { showFeedback: true, feedback },
+        });
+      }
     } catch (e) {
       console.warn("Terminate save warn:", e);
-    } finally {
       navigate("/interviews");
     }
   };
 
+  // Timer
   // Timer
   useEffect(() => {
     timerIntervalRef.current = setInterval(() => {
@@ -386,6 +461,25 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
         if (prev <= 1) {
           clearInterval(timerIntervalRef.current);
           setSessionComplete(true);
+
+          // 🛑 Kill voice & audio when time ends
+          if ("speechSynthesis" in window) {
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.pause();
+          }
+          stopAudioCapture().catch(() => { });
+          setIsCapturing(false);
+          setIsListening(false);
+
+          // Turn off camera too for safety
+          if (videoRef.current?.srcObject) {
+            videoRef.current.srcObject
+              .getTracks()
+              .forEach((t) => t.stop());
+            videoRef.current.srcObject = null;
+          }
+          setShowUserVideo(false);
+
           return 0;
         }
         return prev - 1;
@@ -410,9 +504,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
     if (showUserVideo) setupWebcam();
     return () => {
       if (videoRef.current?.srcObject) {
-        videoRef.current.srcObject
-          .getTracks()
-          .forEach((t) => t.stop());
+        videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
       }
     };
   }, [showUserVideo]);
@@ -433,7 +525,11 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
         // Ensure /api/setup already called by your setup page.
         // Kick off conversation by sending an empty blob.
         const formData = new FormData();
-        formData.append("audio", new Blob([], { type: "audio/webm" }), "init.webm");
+        formData.append(
+          "audio",
+          new Blob([], { type: "audio/webm" }),
+          "init.webm"
+        );
         formData.append("focus_score", "1.0");
 
         const res = await fetch(`${API_BASE_URL}/api/audio`, {
@@ -443,12 +539,8 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
         });
 
         if (!res.ok) {
-          const err = await res
-            .json()
-            .catch(() => ({}));
-          throw new Error(
-            err.detail || "Failed to initialize interview"
-          );
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || "Failed to initialize interview");
         }
 
         const data = await res.json();
@@ -474,6 +566,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
           .forEach((t) => t.stop());
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn]);
 
   // Skip
@@ -484,7 +577,11 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
     setLoading(true);
     try {
       const formData = new FormData();
-      formData.append("audio", new Blob([], { type: "audio/webm" }), "skip.webm");
+      formData.append(
+        "audio",
+        new Blob([], { type: "audio/webm" }),
+        "skip.webm"
+      );
       formData.append("focus_score", "0");
 
       const res = await fetch(`${API_BASE_URL}/api/audio`, {
@@ -531,16 +628,24 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
       }
     } catch (e) {
       console.error("Feedback error:", e);
-      setError(
-        "Failed to retrieve feedback. Redirecting..."
-      );
+      setError("Failed to retrieve feedback. Redirecting...");
       setTimeout(() => navigate("/interviews"), 1500);
     } finally {
       setLoading(false);
     }
   };
 
-  // Completed screen (light / dashboard-style)
+  // 🔁 When session completes (timer or AI), automatically show feedback
+  useEffect(() => {
+    if (!sessionComplete) return;
+    const timeout = setTimeout(() => {
+      handleViewResults();
+    }, 500);
+    return () => clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionComplete]);
+
+  // Completed screen (kept, but usually you'll jump to feedback quickly)
   if (sessionComplete) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -715,11 +820,10 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                 Time Remaining
               </p>
               <p
-                className={`text-2xl font-mono font-bold ${
-                  timeLeft < 60
-                    ? "text-amber-200"
-                    : "text-emerald-200"
-                }`}
+                className={`text-2xl font-mono font-bold ${timeLeft < 60
+                  ? "text-amber-200"
+                  : "text-emerald-200"
+                  }`}
               >
                 {formatTime(timeLeft)}
               </p>
@@ -765,15 +869,16 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                 </div>
                 <div className="flex flex-col items-end gap-1">
                   <span
-                    className={`px-3 py-1 rounded-full text-[11px] font-medium ${
-                      isSpeaking
-                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300"
-                        : "bg-gray-100 text-gray-700 dark:bg-gray-900/60 dark:text-gray-300"
-                    }`}
+                    className={`px-3 py-1 rounded-full text-[11px] font-medium ${isSpeaking
+                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300"
+                      : "bg-gray-100 text-gray-700 dark:bg-gray-900/60 dark:text-gray-300"
+                      }`}
                   >
                     {isSpeaking
                       ? "Reading question…"
-                      : "Ready for answer"}
+                      : isCapturing
+                        ? "Recording answer…"
+                        : "Ready for answer"}
                   </span>
                   {currentConfidence > 0 && (
                     <span className="px-3 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-200">
@@ -801,9 +906,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                   <div className="mt-4 bg-gray-50 dark:bg-gray-900/50 rounded-xl border border-gray-100 dark:border-gray-700 px-4 py-6">
                     {isCapturing ? (
                       <div className="flex flex-col items-center">
-                        <AudioVisualization
-                          frequency={frequency}
-                        />
+                        <AudioVisualization frequency={frequency} />
                         <p className="mt-3 text-xs text-gray-700 dark:text-gray-300 font-medium">
                           {isListening
                             ? "Listening… speak clearly into your mic."
@@ -874,9 +977,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                   <div className="mt-6 flex flex-wrap justify-center gap-3">
                     <button
                       onClick={handleRepeatQuestion}
-                      disabled={
-                        loading || isSpeaking || isCapturing
-                      }
+                      disabled={loading || isSpeaking || isCapturing}
                       className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
                     >
                       <Volume2 className="w-4 h-4" />
@@ -918,9 +1019,7 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                         </span>
                         <div className="flex items-center gap-1.5">
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-200">
-                            {formatTime(
-                              answer.recordingTime
-                            )}
+                            {formatTime(answer.recordingTime)}
                           </span>
                           {answer.confidence > 0 && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300">
@@ -968,37 +1067,46 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                   <span className="font-semibold text-emerald-600 dark:text-emerald-300">
                     {answers.length > 0
                       ? Math.round(
-                          (answers.reduce(
-                            (sum, a) =>
-                              sum + (a.confidence || 0),
-                            0
-                          ) /
-                            answers.length) *
-                            100
-                        )
+                        (answers.reduce(
+                          (sum, a) =>
+                            sum + (a.confidence || 0),
+                          0
+                        ) /
+                          answers.length) *
+                        100
+                      )
                       : 0}
                     %
                   </span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-500 dark:text-gray-400">
-                    Avg. Focus (self-rated)
-                  </span>
-                  <span className="font-semibold text-purple-600 dark:text-purple-300">
-                    {answers.length > 0
-                      ? Math.round(
-                          (answers.reduce(
-                            (sum, a) =>
-                              sum + (a.focusScore || 0),
-                            0
-                          ) /
-                            answers.length) *
-                            100
-                        )
-                      : 0}
-                    %
-                  </span>
+                <hr className="my-3 border-gray-300 dark:border-gray-700" />
+
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">
+                  Behavior Tracking
+                </h3>
+
+                <div className="space-y-3 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Engagement</span>
+                    <span>{(behavior.engagement * 100).toFixed(0)}%</span>
+                  </div>
+
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Looking Away</span>
+                    <span>{behavior.lookingAway ? "Yes" : "No"}</span>
+                  </div>
+
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Blink Rate</span>
+                    <span>{behavior.blinkRate.toFixed(2)}</span>
+                  </div>
+
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Fidget Score</span>
+                    <span>{(behavior.fidgetScore * 100).toFixed(0)}%</span>
+                  </div>
                 </div>
+
               </div>
             </div>
 
@@ -1012,11 +1120,10 @@ const InterviewSession = ({ sessionConfig: sessionConfigProp, onComplete }) => {
                   onClick={() =>
                     setShowUserVideo((v) => !v)
                   }
-                  className={`px-3 py-1 rounded-lg text-[11px] font-semibold border transition ${
-                    showUserVideo
-                      ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 border-green-200 dark:border-green-700"
-                      : "bg-gray-50 dark:bg-gray-900/40 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700"
-                  }`}
+                  className={`px-3 py-1 rounded-lg text-[11px] font-semibold border transition ${showUserVideo
+                    ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 border-green-200 dark:border-green-700"
+                    : "bg-gray-50 dark:bg-gray-900/40 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700"
+                    }`}
                 >
                   {showUserVideo ? "On" : "Off"}
                 </button>

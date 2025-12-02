@@ -197,6 +197,7 @@ async def handle_audio(audio: UploadFile = File(...), focus_score: Optional[floa
         return {"text": first_question, "answer": "", "confidence": 0.0}
 
     answer = transcribe(tmp_path)
+    """
     wav_path=f"temp_wav_{uuid4().hex}.wav"
     cmd = [
         "ffmpeg", "-y",
@@ -210,12 +211,12 @@ async def handle_audio(audio: UploadFile = File(...), focus_score: Optional[floa
     result = subprocess.run(cmd, capture_output=True, text=True)
     print("FFMPEG STDERR:", result.stderr)
 
-
-    confidence = get_confidence_score(wav_path)
+"""
+    confidence = get_confidence_score(tmp_path)
 
     # cleanup
     os.remove(tmp_path)
-    os.remove(wav_path)
+    #os.remove(wav_path)
 
     # Get the current session object
     if isinstance(session_info, dict):
@@ -295,6 +296,90 @@ async def handle_audio(audio: UploadFile = File(...), focus_score: Optional[floa
 
 @app.get("/api/feedback")
 def get_feedback(user: str = Depends(get_current_user)):
+    session_info = user_sessions.get(user)
+
+    if not session_info:
+        raise HTTPException(status_code=404, detail="No active session")
+
+    feedback_data = {}
+    transcript_data = ""
+
+    session = session_info if not isinstance(session_info, dict) else session_info.get(session_info["current"])
+    if not hasattr(session, "meta") or session.meta is None:
+        session.meta = {}
+
+    # ----------- Build Feedback + Transcript -----------
+    if isinstance(session_info, dict) and session_info.get("mode") == "full":
+        tech_fb = session_info["tech"].generate_feedback()
+        hr_fb = session_info["hr"].generate_feedback()
+        feedback_data = {
+            "technical": tech_fb,
+            "behavioral": hr_fb
+        }
+
+        if "code" in session_info:
+            code_fb = session_info["code"].generate_feedback()
+            feedback_data["coding"] = code_fb
+
+        transcript_data = "\n".join([
+            f"Q: {q['question']}\nA: {q['answer']}"
+            for q in session_info["tech"].history + session_info["hr"].history
+        ])
+
+    else:
+        summary = session.generate_feedback()
+        feedback_data = json.loads(summary) if isinstance(summary, str) else summary
+
+        transcript_data = "\n".join([
+            f"Q: {q['question']}\nA: {q['answer']}"
+            for q in session.history
+        ])
+
+    # ----------- Compute Metrics -----------
+    if isinstance(session_info, dict):
+        all_conf, all_focus = [], []
+        for key in ["tech", "hr"]:
+            scores = getattr(session_info[key], "meta", {})
+            all_conf += scores.get("confidence_scores", [])
+            all_focus += scores.get("focus_scores", [])
+        avg_conf = float(np.mean(all_conf)) if all_conf else 0.0
+        avg_focus = float(np.mean(all_focus)) if all_focus else 0.0
+    else:
+        avg_conf = float(np.mean(session.meta.get("confidence_scores", [])))
+        avg_focus = float(np.mean(session.meta.get("focus_scores", [])))
+
+    # ----------- Save Interview Once -----------
+    inserted_id = None
+    if not session.meta.get("feedback_saved"):
+        doc = {
+            "userId": user,
+            "role": session_info["tech"].role if isinstance(session_info, dict) else session.role,
+            "date": datetime.now().isoformat(),
+            "mode": session_info["mode"] if isinstance(session_info, dict) else getattr(session_info, "round_type", "custom"),
+            "transcript": transcript_data,
+            "feedback": feedback_data,
+            "average_confidence": avg_conf,
+            "average_focus": avg_focus
+        }
+
+        result = interviews_collection.insert_one(doc)
+        inserted_id = str(result.inserted_id)
+
+        session.meta["feedback_saved"] = True
+        session.meta["inserted_id"] = inserted_id
+
+    else:
+        inserted_id = session.meta.get("inserted_id")
+
+    # ----------- Return Everything Needed by Frontend -----------
+    return {
+        "id": inserted_id,
+        "feedback": feedback_data,
+        "average_confidence": avg_conf,
+        "average_focus": avg_focus,
+        "transcript": transcript_data,
+    }
+
     session_info = user_sessions.get(user)
 
     if not session_info:
